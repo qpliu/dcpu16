@@ -38,8 +38,8 @@ basic dcpu opcode a b
   | opcode == 0x02 = overflow (+) (\ x y -> if x + y >= max x y then 0 else 1) 1
   | opcode == 0x03 = overflow (-) (\ x y -> if x >= y then 0 else -1) 1
   | opcode == 0x04 = overflow (*) (\ x y -> fromIntegral ((fromIntegral x * fromIntegral y :: Word32) `shiftR` 16)) 1
-  | opcode == 0x05 = overflow div (\ x y -> fromIntegral ((fromIntegral x `shiftL` 16) `div` fromIntegral y :: Word32)) 2
-  | opcode == 0x06 = binop (\ x y -> if y == 0 then 0 else x `mod` y) 2
+  | opcode == 0x05 = overflow (zerosafe div) (zerosafe (\ x y -> fromIntegral ((fromIntegral x `shiftL` 16) `div` fromIntegral y :: Word32))) 2
+  | opcode == 0x06 = binop (zerosafe mod) 2
   | opcode == 0x07 = overflow (\ x y -> x `shiftL` fromIntegral y) (\ x y -> x `shiftR` (16 - fromIntegral y)) 1
   | opcode == 0x08 = overflow (\ x y -> x `shiftR` fromIntegral y) (\ x y -> x `shiftL` (16 - fromIntegral y)) 1
   | opcode == 0x09 = binop (.&.) 0
@@ -51,6 +51,7 @@ basic dcpu opcode a b
   | opcode == 0x0f = branch (.&.) 0
   | otherwise = error ("Unknown basic opcode " ++ show opcode)
   where
+    zerosafe op x y = if y == 0 then 0 else op x y
     binop op cycles = do
         worda <- fst a
         wordb <- fst b
