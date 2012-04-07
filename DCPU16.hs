@@ -98,6 +98,7 @@ register r = error ("Unknown register " ++ show r)
 
 nextWord :: Monad m => DCPU m -> m Word16
 nextWord dcpu = do
+    tick dcpu 1
     pc <- readRegister dcpu PC
     writeRegister dcpu PC (pc + 1)
     readRAM dcpu pc
