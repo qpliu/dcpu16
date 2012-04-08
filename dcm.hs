@@ -3,16 +3,17 @@
 -- Keyboard input buffer is at 0x9000-0x900f.
 -- 40x25 screen buffer is at 0x8000-0x83f7.
 
-import Control.Concurrent(MVar,newMVar,putMVar,takeMVar,tryPutMVar,forkIO,yield)
-import Control.Monad(forever,when,void)
-import Data.Array.IO(IOArray)
+import Control.Concurrent(forkIO)
+import Control.Monad(forever)
+import Data.Array.IO(IOUArray)
 import Data.Array.MArray(newListArray,readArray,writeArray)
 import Data.Bits((.&.),shiftR)
 import qualified Data.ByteString as B
 import Data.Char(chr,ord)
 import Data.Word(Word8,Word16)
 import System.Environment(getArgs)
-import UI.HSCurses.Curses(CursorVisibility(CursorInvisible),Key(KeyChar),Pair(Pair),Color(Color),initCurses,startColor,resetParams,initPair,cursSet,wclear,stdScr,mvWAddStr,wMove,vline,wAttrSet,attr0,refresh,update,getCh,noDelay,endWin)
+import System.IO(stdin,hReady,BufferMode(NoBuffering),hSetBuffering,hSetEcho,hSetBinaryMode,hGetChar)
+import UI.HSCurses.Curses(CursorVisibility(CursorInvisible),Pair(Pair),Color(Color),initCurses,startColor,resetParams,initPair,cursSet,wclear,stdScr,mvWAddStr,wMove,vline,wAttrSet,attr0,refresh,update,endWin,ulCorner,hLine)
 
 import DCPU16(DCPU(DCPU,tick,readRegister,writeRegister,readRAM,writeRAM),Register,step)
 
@@ -22,16 +23,9 @@ main = do
     image <- readImage args
     ram <- newListArray (minBound,maxBound) (image ++ [0,0..])
     registers <- newListArray (minBound,maxBound) [0,0..]
-    output <- newMVar ()
+    forkIO $ run ram registers
     initScreen
-    forkIO $ run ram registers output
-    updateScreen ram
-    refresh
-    forkIO $ forever $ (update >> takeMVar output >> updateScreen ram)
-    done <- newMVar ()
-    forkIO $ readInput ram keyboard done
-    putMVar done ()
-    endWin
+    runIO ram keyboard
 
 readImage :: [String] -> IO [Word16]
 readImage args
@@ -44,39 +38,47 @@ readImage args
     toWords [b] = [fromIntegral b * 256]
     toWords (b1:b2:bs) = fromIntegral b1 * 256 + fromIntegral b2 : toWords bs
 
-run :: IOArray Word16 Word16 -> IOArray Register Word16 -> MVar () -> IO ()
-run ram registers output = forever $ step dcpu
+run :: IOUArray Word16 Word16 -> IOUArray Register Word16 -> IO ()
+run ram registers = forever $ step dcpu
   where
     dcpu = DCPU {
-        tick = const yield,
+        tick = const (return ()),
         readRegister = readArray registers,
         writeRegister = writeArray registers,
         readRAM = readArray ram,
-        writeRAM = writeRAMIO
+        writeRAM = writeArray ram
         }
-    writeRAMIO addr word = do
-        writeArray ram addr word
-        when (addr >= screen && addr < screen + screenSize) (void $ tryPutMVar output ())
+
+runIO :: IOUArray Word16 Word16 -> Word16 -> IO ()
+runIO ram index = do
+    updateScreen ram
+    refresh
+    update
+    ready <- hReady stdin
+    newIndex <- if ready then readInput ram index else return (Just index)
+    maybe (return ()) (runIO ram) newIndex
 
 initScreen :: IO ()
 initScreen = do
+    hSetBuffering stdin NoBuffering
+    hSetEcho stdin False
+    hSetBinaryMode stdin True
     initCurses
     startColor
     resetParams
     sequence_ [initPair (Pair (fore+back*8+1)) (Color fore) (Color back) | fore <- [0..7], back <- [0..7]]
     cursSet CursorInvisible
-    noDelay stdScr True
     wclear stdScr
-    mvWAddStr stdScr 1 21 "+-------+"
-    mvWAddStr stdScr 2 19 ("+-+       +" ++ replicate 30 '-' ++ "+")
+    wAttrSet stdScr (attr0,Pair 56)
+    mvWAddStr stdScr 2 19 $ replicate 42 ' '
     wMove stdScr 3 19
-    vline '|' 25
+    vline ' ' 25
     wMove stdScr 3 60
-    vline '|' 25
-    mvWAddStr stdScr 28 19 ("+" ++ replicate 40 '-' ++ "+")
+    vline ' ' 25
+    mvWAddStr stdScr 28 19 $ replicate 42 ' '
     mvWAddStr stdScr 2 23 "DCM I"
 
-updateScreen :: IOArray Word16 Word16 -> IO ()
+updateScreen :: IOUArray Word16 Word16 -> IO ()
 updateScreen ram = do
     sequence_ [updateCell x y | x <- [0..screenWidth-1], y <- [0..screenHeight-1]]
   where
@@ -88,17 +90,18 @@ updateScreen ram = do
       | ch .&. 0x80 == 0 = 8
       | otherwise = 1 + fromIntegral (shiftR ch 12 .&. 7) + 8*fromIntegral (shiftR ch 8 .&. 7)
 
-readInput :: IOArray Word16 Word16 -> Word16 -> MVar () -> IO ()
-readInput ram index done
-  | index >= keyboard + keyboardSize = readInput ram keyboard done
-  | otherwise = do
-    ch <- getCh
-    case ch of
-      KeyChar '\3' -> takeMVar done
-      KeyChar c -> do
-        writeArray ram index (fromIntegral (ord c))
-        readInput ram (index + 1) done
-      _ -> readInput ram (index + 1) done
+readInput :: IOUArray Word16 Word16 -> Word16 -> IO (Maybe Word16)
+readInput ram index = do
+    ch <- hGetChar stdin
+    if ch == '\3'
+      then do
+        endWin
+        return Nothing
+      else do
+        writeArray ram index (fromIntegral (ord ch))
+        if index + 1 >= keyboard + keyboardSize
+          then return (Just keyboard)
+          else return (Just (index + 1))
 
 screen :: Word16
 screen = 0x8000
@@ -120,7 +123,7 @@ keyboardSize = 0x10
 
 image0 :: [Word16]
 image0 = [
-  0x7dc1, 0x002c,        -- 00: SET PC, 002c ;init
+  0x7dc1, 0x0034,        -- 00: SET PC, 0034 ;init
                          --  loop0:
   0x7ca1, 0x07a0,        -- 02: SET [C], 07a0
                          --  loop1:
@@ -129,45 +132,53 @@ image0 = [
   0x8dc3,                -- 06: SUB PC, 03 ;loop1
   0x7ca1, 0x74a0,        -- 07: SET [C], 74a0
   0x8091,                -- 09: SET [B], 00
-  0x8412,                -- 0a: ADD B, 1
+  0x8412,                -- 0a: ADD B, 01
   0x7c19, 0xf00f,        -- 0b: AND B, f00f
-  0xb40c,                -- 0d: IFE A, 0d
-  0xedc1,                -- 0e: SET PC, 1b ;scroll
-  0x01fe, 0x0020,        -- 0f: IFG 0020, A
-  0x89c1,                -- 11: SET PC, 02 ;loop0
-  0x7c09, 0x007f,        -- 12: AND A, 007f
-  0x7c0a, 0x7480,        -- 14: BOR A, 7480
-  0x00a1,                -- 16: SET [C], A
-  0x8422,                -- 17: ADD C, 1
-  0x09fe, 0x83e8,        -- 18: IFG 83e8, C
-  0x89c1,                -- 1a: SET PC, 02 ;loop0
+  0x7c09, 0x007f,        -- 0d: AND A, 007f
+  0xb40c,                -- 0f: IFE A, 0d
+  0xb9c2,                -- 10: ADD PC, 0e ;scroll
+  0x01fe, 0x0020,        -- 11: IFG 0020, A
+  0x89c1,                -- 13: SET PC, 02 ;loop0
+  0x7c0c, 0x007f,        -- 14: IFE A, 007f
+  0x7dc1, 0x0030,        -- 16: SET PC, 0030 ;backspace
+  0x7c0a, 0x7480,        -- 18: BOR A, 7480
+  0x00a1,                -- 1a: SET [C], A
+  0x8422,                -- 1b: ADD C, 01
+  0x09fe, 0x83e8,        -- 1c: IFG 83e8, C
+  0x89c1,                -- 1e: SET PC, 02 ;loop0
                          --  scroll:
-  0x7c21, 0x83c0,        -- 1b: SET C, 83c0
-  0x7c61, 0x8000,        -- 1d: SET I, 8000
+  0x7c21, 0x83c0,        -- 1f: SET C, 83c0
+  0x7c61, 0x8000,        -- 21: SET I, 8000
                          --  loop2:
-  0x58e1, 0x0028,        -- 1f: SET [I], [0028+I]
-  0x8462,                -- 21: ADD I, 1
-  0x19fe, 0x83c0,        -- 22: IFG 83c0, I
-  0x99c3,                -- 24: SUB PC, 0006 ;loop2
+  0x58e1, 0x0028,        -- 23: SET [I], [0028+I]
+  0x8462,                -- 25: ADD I, 01
+  0x19fe, 0x83c0,        -- 26: IFG 83c0, I
+  0x99c3,                -- 28: SUB PC, 0006 ;loop2
                          --  loop3:
-  0x7ce1, 0x74a0,        -- 25: SET [I], 74a0
-  0x8462,                -- 27: ADD I, 1
-  0x19fe, 0x83e8,        -- 28: IFG 83e8, I
-  0x99c3,                -- 2a: SUB PC, 06 ;loop3
-  0x89c1,                -- 2b: SET PC, 02 ;loop0
+  0x7ce1, 0x74a0,        -- 29: SET [I], 74a0
+  0x8462,                -- 2b: ADD I, 01
+  0x19fe, 0x83e8,        -- 2c: IFG 83e8, I
+  0x99c3,                -- 2e: SUB PC, 06 ;loop3
+  0x89c1,                -- 2f: SET PC, 02 ;loop0
+                         --  backspace:
+  0x7c2e, 0x83c0,        -- 30: IFG C, 83c0
+  0x8423,                -- 32: SUB C, 01
+  0x89c1,                -- 33: SET PC, 02 ;loop0
                          --  init:
-  0x7c21, 0x8000,        -- 2c: SET C, 8000
+  0x7c21, 0x8000,        -- 34: SET C, 8000
                          --  loop4:
-  0x7ca1, 0x74a0,        -- 2e: SET [C], 74a0
-  0x8422,                -- 30: ADD C, 01
-  0x09fe, 0x83e8,        -- 31: IFG 83e8, C
-  0x99c3,                -- 33: SUB PC, 6 ;loop4
+  0x7ca1, 0x74a0,        -- 36: SET [C], 74a0
+  0x8422,                -- 38: ADD C, 01
+  0x09fe, 0x83e8,        -- 39: IFG 83e8, C
+  0x99c3,                -- 3b: SUB PC, 6 ;loop4
                          --  loop5:
-  0x4101, 0x8398, 0x0040,-- 34: SET [8398+A], [0040+A]
-  0x8402,                -- 37: ADD A, 01
-  0x810d, 0x0040,        -- 38: IFN [0040+A], 00
-  0x9dc3,                -- 3a: SUB PC, 07 ;loop5
-  0x7c11, 0x9000,        -- 3b: SET B, 9000
-  0x7c21, 0x83c0,        -- 3d: SET C, 83c0
-  0x89c1,                -- 3f: SET PC, 02 ;loop0
+  0x4101, 0x8398, 0x0048,-- 3c: SET [8398+A], [0048+A] ;data
+  0x8402,                -- 3f: ADD A, 01
+  0x810d, 0x0048,        -- 40: IFN [0048+A], 00 ;data
+  0x9dc3,                -- 42: SUB PC, 07 ;loop5
+  0x7c11, 0x9000,        -- 43: SET B, 9000
+  0x7c21, 0x83c0,        -- 45: SET C, 83c0
+  0x89c1,                -- 47: SET PC, 02 ;loop0
+                         --  data:
+                         -- 48:
   0x64d2, 0x64e5, 0x64e1, 0x64e4, 0x64f9]
