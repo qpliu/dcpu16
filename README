@@ -1,0 +1,14 @@
+This implements version 1.1 of http://0x10c.com/doc/dcpu-16.txt,
+with a keyboard input buffer at 9000-900f and a 40x25 screen buffer at 8000-83f7.
+
+To build:
+
+    ghc --make dcm
+
+To run:
+
+    ./dcm [-r] [-l] [image file]
+
+The -r flag turns on the register display.  The image file is loaded into memory and run.
+If the -l flag is given, the image file is read as little endian, otherwise it is read as
+big endian.  If no image file is given, a simple default image is used.
