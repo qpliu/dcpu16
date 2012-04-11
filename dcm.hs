@@ -43,7 +43,7 @@ parseArgs args
     toWords [b] = [fromIntegral b * 256]
     toWords (b1:b2:bs) = fromIntegral b1 * 256 + fromIntegral b2 : toWords bs
     toWordsLE [] = []
-    toWordsLE [b] = [fromIntegral b * 256]
+    toWordsLE [b] = [fromIntegral b]
     toWordsLE (b1:b2:bs) = fromIntegral b1 + fromIntegral b2 * 256 : toWordsLE bs
 
 run :: Bool -> IOUArray Word16 Word16 -> IOUArray Register Word16 -> IO ()
