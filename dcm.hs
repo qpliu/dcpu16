@@ -33,12 +33,18 @@ parseArgs args
   where
     readImage args
       | null args = return image0
+      | not (null (tail args)) && head args == "-l" = do
+            bytes <- B.readFile (head $ tail args)
+            return (toWordsLE (B.unpack bytes))
       | otherwise = do
             bytes <- B.readFile (head args)
             return (toWords (B.unpack bytes))
     toWords [] = []
     toWords [b] = [fromIntegral b * 256]
     toWords (b1:b2:bs) = fromIntegral b1 * 256 + fromIntegral b2 : toWords bs
+    toWordsLE [] = []
+    toWordsLE [b] = [fromIntegral b * 256]
+    toWordsLE (b1:b2:bs) = fromIntegral b1 + fromIntegral b2 * 256 : toWordsLE bs
 
 run :: Bool -> IOUArray Word16 Word16 -> IOUArray Register Word16 -> IO ()
 run showRegisters ram registers = runStep keyboard
