@@ -6,7 +6,7 @@ import Data.Ix(Ix)
 import Data.Word(Word16,Word32)
 
 data Register = A | B | C | X | Y | Z | I | J | PC | SP | O
-    deriving (Bounded,Eq,Ix,Ord)
+    deriving (Bounded,Enum,Eq,Ix,Ord,Show)
 
 -- For example, m could be IO, Control.Monad.ST.ST,
 -- or Control.Concurrent.STM.STM.

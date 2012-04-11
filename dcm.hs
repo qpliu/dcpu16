@@ -3,8 +3,7 @@
 -- Keyboard input buffer is at 0x9000-0x900f.
 -- 40x25 screen buffer is at 0x8000-0x83f7.
 
-import Control.Concurrent(forkIO)
-import Control.Monad(forever)
+import Control.Monad(when,zipWithM_)
 import Data.Array.IO(IOUArray)
 import Data.Array.MArray(newListArray,readArray,writeArray)
 import Data.Bits((.&.),shiftR)
@@ -13,53 +12,67 @@ import Data.Char(chr,ord)
 import Data.Word(Word8,Word16)
 import System.Environment(getArgs)
 import System.IO(stdin,hReady,BufferMode(NoBuffering),hSetBuffering,hSetEcho,hSetBinaryMode,hGetChar)
-import UI.HSCurses.Curses(CursorVisibility(CursorInvisible),Pair(Pair),Color(Color),initCurses,startColor,resetParams,initPair,cursSet,wclear,stdScr,mvWAddStr,wMove,vline,wAttrSet,attr0,refresh,update,endWin,ulCorner,hLine)
+import Text.Printf(printf)
+import UI.HSCurses.Curses(CursorVisibility(CursorInvisible),Pair(Pair),Color(Color),initCurses,startColor,resetParams,initPair,cursSet,wclear,stdScr,mvWAddStr,wMove,vline,wAttrSet,attr0,refresh,endWin,ulCorner,hLine)
 
 import DCPU16(DCPU(DCPU,tick,readRegister,writeRegister,readRAM,writeRAM),Register,step)
 
 main :: IO ()
 main = do
     args <- getArgs
-    image <- readImage args
+    (showRegisters,image) <- parseArgs args
     ram <- newListArray (minBound,maxBound) (image ++ [0,0..])
     registers <- newListArray (minBound,maxBound) [0,0..]
-    forkIO $ run ram registers
-    initScreen
-    runIO ram keyboard
+    initScreen ram
+    run showRegisters ram registers
 
-readImage :: [String] -> IO [Word16]
-readImage args
-  | null args = return image0
-  | otherwise = do
-        bytes <- B.readFile (head args)
-        return (toWords (B.unpack bytes))
+parseArgs :: [String] -> IO (Bool,[Word16])
+parseArgs args
+  | take 1 args == ["-r"] = fmap ((,) True) (readImage (tail args))
+  | otherwise = fmap ((,) False) (readImage args)
   where
+    readImage args
+      | null args = return image0
+      | otherwise = do
+            bytes <- B.readFile (head args)
+            return (toWords (B.unpack bytes))
     toWords [] = []
     toWords [b] = [fromIntegral b * 256]
     toWords (b1:b2:bs) = fromIntegral b1 * 256 + fromIntegral b2 : toWords bs
 
-run :: IOUArray Word16 Word16 -> IOUArray Register Word16 -> IO ()
-run ram registers = forever $ step dcpu
+run :: Bool -> IOUArray Word16 Word16 -> IOUArray Register Word16 -> IO ()
+run showRegisters ram registers = runStep keyboard
   where
+    runStep index = do
+        step dcpu
+        if showRegisters
+          then do
+            wAttrSet stdScr (attr0,Pair 0)
+            zipWithM_ displayRegister [minBound .. maxBound] [5..]
+          else return ()
+        ready <- hReady stdin
+        if ready
+          then do
+            refresh
+            newIndex <- readInput ram index
+            maybe endWin runStep newIndex
+          else runStep index
     dcpu = DCPU {
         tick = const (return ()),
         readRegister = readArray registers,
         writeRegister = writeArray registers,
         readRAM = readArray ram,
-        writeRAM = writeArray ram
+        writeRAM = writeMemory
         }
+    writeMemory addr word = do
+        writeArray ram addr word
+        updateScreen True ram addr
+    displayRegister register y = do
+        word <- readArray registers register
+        mvWAddStr stdScr y 3 $ printf "%2s:%04x" (show register) word
 
-runIO :: IOUArray Word16 Word16 -> Word16 -> IO ()
-runIO ram index = do
-    updateScreen ram
-    refresh
-    update
-    ready <- hReady stdin
-    newIndex <- if ready then readInput ram index else return (Just index)
-    maybe (return ()) (runIO ram) newIndex
-
-initScreen :: IO ()
-initScreen = do
+initScreen :: IOUArray Word16 Word16 -> IO ()
+initScreen ram = do
     hSetBuffering stdin NoBuffering
     hSetEcho stdin False
     hSetBinaryMode stdin True
@@ -77,15 +90,20 @@ initScreen = do
     vline ' ' 25
     mvWAddStr stdScr 28 19 $ replicate 42 ' '
     mvWAddStr stdScr 2 23 "DCM I"
+    mapM_ (updateScreen False ram) [screen .. screen + screenSize - 1]
+    refresh
 
-updateScreen :: IOUArray Word16 Word16 -> IO ()
-updateScreen ram = do
-    sequence_ [updateCell x y | x <- [0..screenWidth-1], y <- [0..screenHeight-1]]
-  where
-    updateCell x y = do
-        ch <- readArray ram (screen + y*screenWidth + x)
+updateScreen :: Bool -> IOUArray Word16 Word16 -> Word16 -> IO ()
+updateScreen doRefresh ram addr
+  | addr < screen || addr >= screen + screenSize = return ()
+  | otherwise = do
+        ch <- readArray ram addr
         wAttrSet stdScr (attr0,Pair (cellColor ch))
-        mvWAddStr stdScr (3 + fromIntegral y) (20 + fromIntegral x) [chr (max 32 (fromIntegral ch .&. 0x7f))]
+        mvWAddStr stdScr (3 + y) (20 + x) [chr (max 32 (fromIntegral ch .&. 0x7f))]
+        when doRefresh refresh
+  where
+    x = fromIntegral $ (addr - screen) `mod` screenWidth
+    y = fromIntegral $ (addr - screen) `div` screenWidth
     cellColor ch
       | ch .&. 0x80 == 0 = 8
       | otherwise = 1 + fromIntegral (shiftR ch 12 .&. 7) + 8*fromIntegral (shiftR ch 8 .&. 7)
@@ -94,9 +112,7 @@ readInput :: IOUArray Word16 Word16 -> Word16 -> IO (Maybe Word16)
 readInput ram index = do
     ch <- hGetChar stdin
     if ch == '\3'
-      then do
-        endWin
-        return Nothing
+      then return Nothing
       else do
         writeArray ram index (fromIntegral (ord ch))
         if index + 1 >= keyboard + keyboardSize
