@@ -181,7 +181,7 @@ readInput ram dcmState ch
           else do
             writeArray ram keyBufferAddr (fromIntegral (ord ch))
             return (Just dcmState { keyBufferIndex = (keyBufferIndex dcmState + 1) `mod` keyBufferSize dcmState })
-    scrollRAM count = return (Just dcmState { dumpRegisters = False, dumpRAM = True, dumpRAMAddr = dumpRAMAddr dcmState + count, readCmd = False, refreshNextStep = True })
+    scrollRAM count = return (Just dcmState { dumpRegisters = False, dumpRAM = True, dumpRAMAddr = dumpRAMAddr dcmState + count, readCmd = True, refreshNextStep = True })
 
 image0 :: DCMState -> [Word16]
 image0 dcmState = [
