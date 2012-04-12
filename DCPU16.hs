@@ -1,6 +1,7 @@
 -- | Implementation of version 1.1 of http://0x10c.com/doc/dcpu-16.txt.
 module DCPU16(DCPU(..),Register(..),step) where
 
+import Control.Monad(replicateM_)
 import Data.Bits((.&.),(.|.),shiftL,shiftR,xor)
 import Data.Ix(Ix)
 import Data.Word(Word16,Word32)
@@ -12,7 +13,7 @@ data Register = A | B | C | X | Y | Z | I | J | PC | SP | O
 -- or Control.Concurrent.STM.STM.
 -- Memory-mapped I/O would be implemented by readRAM and writeRAM.
 data DCPU m = DCPU {
-    tick :: Int -> m (),
+    tick :: m (),
     readRAM :: Word16 -> m Word16,
     writeRAM :: Word16 -> Word16 -> m (),
     readRegister :: Register -> m Word16,
@@ -56,13 +57,13 @@ basic dcpu opcode a b
         worda <- fst a
         wordb <- fst b
         snd a (worda `op` wordb)
-        tick dcpu cycles
+        replicateM_ cycles (tick dcpu)
     overflow op overflowop cycles = do
         worda <- fst a
         wordb <- fst b
         snd a (worda `op` wordb)
         writeRegister dcpu O (worda `overflowop` wordb)
-        tick dcpu cycles
+        replicateM_ cycles (tick dcpu)
     branch op skip = do
         worda <- fst a
         wordb <- fst b
@@ -71,8 +72,8 @@ basic dcpu opcode a b
             pc <- readRegister dcpu PC
             insn <- readRAM dcpu pc
             writeRegister dcpu PC (pc + fromIntegral (insnSize insn))
-            tick dcpu 2
-          else tick dcpu 1
+            replicateM_ 2 (tick dcpu)
+          else tick dcpu
 
 nonBasic :: Monad m => DCPU m -> Word16 -> Operand m -> m ()
 nonBasic dcpu opcode a
@@ -83,7 +84,7 @@ nonBasic dcpu opcode a
         writeRegister dcpu SP (sp - 1)
         writeRAM dcpu (sp - 1) pc
         writeRegister dcpu PC word
-        tick dcpu 1
+        tick dcpu
   | otherwise = error ("Unknown non-basic opcode " ++ show opcode)
 
 register :: Word16 -> Register
@@ -99,7 +100,7 @@ register r = error ("Unknown register " ++ show r)
 
 nextWord :: Monad m => DCPU m -> m Word16
 nextWord dcpu = do
-    tick dcpu 1
+    tick dcpu
     pc <- readRegister dcpu PC
     writeRegister dcpu PC (pc + 1)
     readRAM dcpu pc

@@ -64,7 +64,7 @@ run showRegisters ram registers = runStep keyboard
             maybe endWin runStep newIndex
           else runStep index
     dcpu = DCPU {
-        tick = const (return ()),
+        tick = return (),
         readRegister = readArray registers,
         writeRegister = writeArray registers,
         readRAM = readArray ram,
