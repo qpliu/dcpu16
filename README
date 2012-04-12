@@ -1,5 +1,6 @@
-This implements version 1.1 of http://0x10c.com/doc/dcpu-16.txt,
-with a keyboard input buffer at 9000-900f and a 40x25 screen buffer at 8000-83f7.
+This implements version 1.1 of http://0x10c.com/doc/dcpu-16.txt
+with a keyboard input buffer at 9000-900f and a screen buffer
+starting at 8000.
 
 To build:
 
@@ -7,8 +8,29 @@ To build:
 
 To run:
 
-    ./dcm [-r] [-l] [image file]
+    ./dcm [-le] [-be] [-WIDTHxHEIGHT] [IMAGE FILE]
 
-The -r flag turns on the register display.  The image file is loaded into memory and run.
-If the -l flag is given, the image file is read as little endian, otherwise it is read as
-big endian.  If no image file is given, a simple default image is used.
+The -le flag specifies a little endian image file.  The -be flag
+specifies a big endian image file.  The WIDTH and HEIGHT the size
+of the display, which defaults to 40x25.  IMAGE FILE is loaded
+into memory and run.  If IMAGE FILE is not given, a simple default
+image is used.
+
+When running, C-x is an escape character:
+
+    C-x C-c    exit
+    C-x c      clear dumps
+    C-x r      dump registers
+    C-x m      dump memory
+    C-x C-b    scroll memory dump
+    C-x C-f    scroll memory dump
+    C-x C-n    scroll memory dump
+    C-x C-p    scroll memory dump
+    C-x b      scroll memory dump
+    C-x f      scroll memory dump
+    C-x n      scroll memory dump
+    C-x p      scroll memory dump
+    C-x B      scroll memory dump
+    C-x F      scroll memory dump
+    C-x N      scroll memory dump
+    C-x P      scroll memory dump

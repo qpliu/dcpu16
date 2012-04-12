@@ -9,60 +9,85 @@ import Data.Array.MArray(newListArray,readArray,writeArray)
 import Data.Bits((.&.),shiftR)
 import qualified Data.ByteString as B
 import Data.Char(chr,ord)
+import Data.Maybe(listToMaybe)
 import Data.Word(Word8,Word16)
 import System.Environment(getArgs)
 import System.IO(stdin,hReady,BufferMode(NoBuffering),hSetBuffering,hSetEcho,hSetBinaryMode,hGetChar)
 import Text.Printf(printf)
-import UI.HSCurses.Curses(CursorVisibility(CursorInvisible),Pair(Pair),Color(Color),initCurses,startColor,resetParams,initPair,cursSet,wclear,stdScr,mvWAddStr,wMove,vline,wAttrSet,attr0,refresh,endWin,ulCorner,hLine)
+import UI.HSCurses.Curses(CursorVisibility(CursorInvisible),Pair(Pair),Color(Color),initCurses,startColor,resetParams,initPair,cursSet,wclear,stdScr,mvWAddStr,wMove,vline,wAttrSet,attr0,refresh,endWin,beep)
 
 import DCPU16(DCPU(DCPU,tick,readRegister,writeRegister,readRAM,writeRAM),Register,step)
+
+data DCMState = DCMState {
+    screenAddr, screenWidth, screenHeight :: Word16,
+    keyBuffer, keyBufferSize, keyBufferIndex :: Word16,
+    dumpRAM :: Bool,
+    dumpRAMAddr :: Word16,
+    dumpRegisters :: Bool,
+    refreshNextStep :: Bool,
+    readCmd :: Bool
+    }
 
 main :: IO ()
 main = do
     args <- getArgs
-    (showRegisters,image) <- parseArgs args
+    (dcmState,image) <- parseArgs args
     ram <- newListArray (minBound,maxBound) (image ++ [0,0..])
     registers <- newListArray (minBound,maxBound) [0,0..]
-    initScreen ram
-    run showRegisters ram registers
+    initScreen ram dcmState
+    run ram registers dcmState
 
-parseArgs :: [String] -> IO (Bool,[Word16])
-parseArgs args
-  | take 1 args == ["-r"] = fmap ((,) True) (readImage (tail args))
-  | otherwise = fmap ((,) False) (readImage args)
+parseArgs :: [String] -> IO (DCMState,[Word16])
+parseArgs args = parseArgs' toWordsBE defaultDCMState args
   where
-    readImage args
-      | null args = return image0
-      | not (null (tail args)) && head args == "-l" = do
-            bytes <- B.readFile (head $ tail args)
-            return (toWordsLE (B.unpack bytes))
-      | otherwise = do
-            bytes <- B.readFile (head args)
-            return (toWords (B.unpack bytes))
-    toWords [] = []
-    toWords [b] = [fromIntegral b * 256]
-    toWords (b1:b2:bs) = fromIntegral b1 * 256 + fromIntegral b2 : toWords bs
+    parseArgs' toWords dcmState args
+      | null args = return (dcmState,image0 dcmState)
+      | head args == "-le" = parseArgs' toWordsLE dcmState (tail args)
+      | head args == "-be" = parseArgs' toWordsBE dcmState (tail args)
+      | parseScreenSize (head args) /= Nothing = parseArgs' toWords (setScreenSize dcmState (parseScreenSize (head args))) (tail args)
+      | otherwise = readImage dcmState (head args) toWords
+    defaultDCMState = DCMState {
+        screenAddr = 0x8000, screenWidth = 40, screenHeight = 25,
+        keyBuffer = 0x9000, keyBufferSize = 16, keyBufferIndex = 0,
+        dumpRAM = False, dumpRAMAddr = 0, dumpRegisters = False,
+        refreshNextStep = False, readCmd = False
+        }
+    readImage dcmState filename toWords = do
+        bytes <- B.readFile filename
+        return (dcmState,toWords (B.unpack bytes))
+    toWordsBE [] = []
+    toWordsBE [b] = [fromIntegral b * 256]
+    toWordsBE (b1:b2:bs) = fromIntegral b1 * 256 + fromIntegral b2 : toWordsBE bs
     toWordsLE [] = []
     toWordsLE [b] = [fromIntegral b]
     toWordsLE (b1:b2:bs) = fromIntegral b1 + fromIntegral b2 * 256 : toWordsLE bs
+    parseScreenSize arg = do
+        arg <- if take 1 arg == "-" then Just (tail arg) else Nothing
+        (w,arg) <- listToMaybe (readsPrec 0 arg)
+        arg <- if take 1 arg == "x" then Just (tail arg) else Nothing
+        (h,arg) <- listToMaybe (readsPrec 0 arg)
+        if arg == "" then Just (max 16 w,max 1 h) else Nothing
+    setScreenSize dcmState Nothing = dcmState
+    setScreenSize dcmState (Just (w,h)) = dcmState { screenWidth = w, screenHeight = h }
 
-run :: Bool -> IOUArray Word16 Word16 -> IOUArray Register Word16 -> IO ()
-run showRegisters ram registers = runStep keyboard
+run :: IOUArray Word16 Word16 -> IOUArray Register Word16 -> DCMState -> IO ()
+run ram registers dcmState = do
+    step dcpu
+    wAttrSet stdScr (attr0,Pair 0)
+    mapM_ displayClear [5..21]
+    when (dumpRegisters dcmState) $ zipWithM_ displayRegister [minBound .. maxBound] [5..21]
+    when (dumpRAM dcmState) $ zipWithM_ displayRAM [dumpRAMAddr dcmState, dumpRAMAddr dcmState + 2 ..] [5..21]
+    ready <- hReady stdin
+    if ready
+      then do
+        refresh
+        ch <- hGetChar stdin
+        newDCMState <- readInput ram dcmState ch
+        maybe endWin (run ram registers) newDCMState
+      else do
+        when (refreshNextStep dcmState) refresh
+        run ram registers dcmState { refreshNextStep = False }
   where
-    runStep index = do
-        step dcpu
-        if showRegisters
-          then do
-            wAttrSet stdScr (attr0,Pair 0)
-            zipWithM_ displayRegister [minBound .. maxBound] [5..]
-          else return ()
-        ready <- hReady stdin
-        if ready
-          then do
-            refresh
-            newIndex <- readInput ram index
-            maybe endWin runStep newIndex
-          else runStep index
     dcpu = DCPU {
         tick = return (),
         readRegister = readArray registers,
@@ -72,13 +97,18 @@ run showRegisters ram registers = runStep keyboard
         }
     writeMemory addr word = do
         writeArray ram addr word
-        updateScreen True ram addr
+        updateScreen True dcmState ram addr
+    displayClear y = mvWAddStr stdScr y 3 "              "
     displayRegister register y = do
         word <- readArray registers register
-        mvWAddStr stdScr y 3 $ printf "%2s:%04x" (show register) word
+        mvWAddStr stdScr y 3 $ printf "  %2s:%04x     " (show register) word
+    displayRAM addr y = do
+        word1 <- readArray ram addr
+        word2 <- readArray ram (addr + 1)
+        mvWAddStr stdScr y 3 $ printf "%04x:%04x %04x" addr word1 word2
 
-initScreen :: IOUArray Word16 Word16 -> IO ()
-initScreen ram = do
+initScreen :: IOUArray Word16 Word16 -> DCMState -> IO ()
+initScreen ram dcmState = do
     hSetBuffering stdin NoBuffering
     hSetEcho stdin False
     hSetBinaryMode stdin True
@@ -89,62 +119,72 @@ initScreen ram = do
     cursSet CursorInvisible
     wclear stdScr
     wAttrSet stdScr (attr0,Pair 56)
-    mvWAddStr stdScr 2 19 $ replicate 42 ' '
+    mvWAddStr stdScr 2 19 $ replicate (2 + fromIntegral (screenWidth dcmState)) ' '
     wMove stdScr 3 19
-    vline ' ' 25
-    wMove stdScr 3 60
-    vline ' ' 25
-    mvWAddStr stdScr 28 19 $ replicate 42 ' '
+    vline ' ' (fromIntegral (screenHeight dcmState))
+    wMove stdScr 3 (fromIntegral (20 + screenWidth dcmState))
+    vline ' ' (fromIntegral (screenHeight dcmState))
+    mvWAddStr stdScr (fromIntegral (3 + screenHeight dcmState)) 19 $ replicate (fromIntegral (2 + screenWidth dcmState)) ' '
     mvWAddStr stdScr 2 23 "DCM I"
-    mapM_ (updateScreen False ram) [screen .. screen + screenSize - 1]
+    mapM_ (updateScreen False dcmState ram) [screenAddr dcmState .. screenAddr dcmState + screenWidth dcmState * screenHeight dcmState - 1]
     refresh
 
-updateScreen :: Bool -> IOUArray Word16 Word16 -> Word16 -> IO ()
-updateScreen doRefresh ram addr
-  | addr < screen || addr >= screen + screenSize = return ()
+updateScreen :: Bool -> DCMState -> IOUArray Word16 Word16 -> Word16 -> IO ()
+updateScreen doRefresh dcmState ram addr
+  | addr < screenStart || addr >= screenEnd = return ()
   | otherwise = do
         ch <- readArray ram addr
         wAttrSet stdScr (attr0,Pair (cellColor ch))
         mvWAddStr stdScr (3 + y) (20 + x) [chr (max 32 (fromIntegral ch .&. 0x7f))]
         when doRefresh refresh
   where
-    x = fromIntegral $ (addr - screen) `mod` screenWidth
-    y = fromIntegral $ (addr - screen) `div` screenWidth
+    screenStart = screenAddr dcmState
+    screenEnd = screenAddr dcmState + screenHeight dcmState*screenWidth dcmState
+    x = fromIntegral $ (addr - screenStart) `mod` screenWidth dcmState
+    y = fromIntegral $ (addr - screenStart) `div` screenWidth dcmState
     cellColor ch
       | ch .&. 0x80 == 0 = 8
       | otherwise = 1 + fromIntegral (shiftR ch 12 .&. 7) + 8*fromIntegral (shiftR ch 8 .&. 7)
 
-readInput :: IOUArray Word16 Word16 -> Word16 -> IO (Maybe Word16)
-readInput ram index = do
-    ch <- hGetChar stdin
-    if ch == '\3'
-      then return Nothing
-      else do
-        writeArray ram index (fromIntegral (ord ch))
-        if index + 1 >= keyboard + keyboardSize
-          then return (Just keyboard)
-          else return (Just (index + 1))
+readInput :: IOUArray Word16 Word16 -> DCMState -> Char -> IO (Maybe DCMState)
+readInput ram dcmState ch
+  | ch == '\3' && readCmd dcmState = return Nothing
+  | ch == 'c' && readCmd dcmState = return (Just dcmState { dumpRegisters = False, dumpRAM = False, readCmd = False, refreshNextStep = True })
+  | ch == 'r' && readCmd dcmState = return (Just dcmState { dumpRegisters = True, dumpRAM = False, readCmd = False, refreshNextStep = True })
+  | ch == 'm' && readCmd dcmState = return (Just dcmState { dumpRegisters = False, dumpRAM = True, readCmd = False, refreshNextStep = True })
+  | ch == '\14' && readCmd dcmState = scrollRAM 1
+  | ch == '\16' && readCmd dcmState = scrollRAM (-1)
+  | ch == 'n' && readCmd dcmState = scrollRAM 16
+  | ch == 'p' && readCmd dcmState = scrollRAM (-16)
+  | ch == 'N' && readCmd dcmState = scrollRAM 0x100
+  | ch == 'P' && readCmd dcmState = scrollRAM (-0x100)
+  | ch == '\2' && readCmd dcmState = scrollRAM (-0x1000)
+  | ch == '\6' && readCmd dcmState = scrollRAM 0x1000
+  | ch == 'b' && readCmd dcmState = scrollRAM (-0x2000)
+  | ch == 'f' && readCmd dcmState = scrollRAM 0x2000
+  | ch == 'B' && readCmd dcmState = scrollRAM (-0x4000)
+  | ch == 'F' && readCmd dcmState = scrollRAM 0x4000
+  | ch == '\24' && readCmd dcmState = insertChar dcmState { readCmd = False }
+  | readCmd dcmState = do
+        beep
+        return (Just dcmState { readCmd = False })
+  | ch == '\24' = return (Just dcmState { readCmd = True })
+  | otherwise = insertChar dcmState
+  where
+    keyBufferAddr = keyBuffer dcmState + keyBufferIndex dcmState
+    insertChar dcmState = do
+        word <- readArray ram keyBufferAddr
+        if word /= 0
+          then do
+            beep
+            return (Just dcmState)
+          else do
+            writeArray ram keyBufferAddr (fromIntegral (ord ch))
+            return (Just dcmState { keyBufferIndex = (keyBufferIndex dcmState + 1) `mod` keyBufferSize dcmState })
+    scrollRAM count = return (Just dcmState { dumpRegisters = False, dumpRAM = True, dumpRAMAddr = dumpRAMAddr dcmState + count, readCmd = False, refreshNextStep = True })
 
-screen :: Word16
-screen = 0x8000
-
-screenWidth :: Word16
-screenWidth = 40
-
-screenHeight :: Word16
-screenHeight = 25
-
-screenSize :: Word16
-screenSize = screenWidth*screenHeight
-
-keyboard :: Word16
-keyboard = 0x9000
-
-keyboardSize :: Word16
-keyboardSize = 0x10
-
-image0 :: [Word16]
-image0 = [
+image0 :: DCMState -> [Word16]
+image0 dcmState = [
   0x7dc1, 0x0034,        -- 00: SET PC, 0034 ;init
                          --  loop0:
   0x7ca1, 0x07a0,        -- 02: SET [C], 07a0
@@ -155,7 +195,7 @@ image0 = [
   0x7ca1, 0x74a0,        -- 07: SET [C], 74a0
   0x8091,                -- 09: SET [B], 00
   0x8412,                -- 0a: ADD B, 01
-  0x7c19, 0xf00f,        -- 0b: AND B, f00f
+  0x7c19, 0xf00f,        -- 0b: AND B, f00f -- assume keyBuffer, keyBufferSize
   0x7c09, 0x007f,        -- 0d: AND A, 007f
   0xb40c,                -- 0f: IFE A, 0d
   0xb9c2,                -- 10: ADD PC, 0e ;scroll
@@ -166,41 +206,47 @@ image0 = [
   0x7c0a, 0x7480,        -- 18: BOR A, 7480
   0x00a1,                -- 1a: SET [C], A
   0x8422,                -- 1b: ADD C, 01
-  0x09fe, 0x83e8,        -- 1c: IFG 83e8, C
+  0x09fe, screenEnd,     -- 1c: IFG 83e8, C
   0x89c1,                -- 1e: SET PC, 02 ;loop0
                          --  scroll:
-  0x7c21, 0x83c0,        -- 1f: SET C, 83c0
-  0x7c61, 0x8000,        -- 21: SET I, 8000
+  0x7c21, screenLastLine,-- 1f: SET C, 83c0
+  0x7c61, screenStart,   -- 21: SET I, 8000
                          --  loop2:
-  0x58e1, 0x0028,        -- 23: SET [I], [0028+I]
+  0x58e1, screenWidth dcmState,
+                         -- 23: SET [I], [0028+I]
   0x8462,                -- 25: ADD I, 01
-  0x19fe, 0x83c0,        -- 26: IFG 83c0, I
+  0x19fe, screenLastLine,-- 26: IFG 83c0, I
   0x99c3,                -- 28: SUB PC, 0006 ;loop2
                          --  loop3:
   0x7ce1, 0x74a0,        -- 29: SET [I], 74a0
   0x8462,                -- 2b: ADD I, 01
-  0x19fe, 0x83e8,        -- 2c: IFG 83e8, I
+  0x19fe, screenEnd,     -- 2c: IFG 83e8, I
   0x99c3,                -- 2e: SUB PC, 06 ;loop3
   0x89c1,                -- 2f: SET PC, 02 ;loop0
                          --  backspace:
-  0x7c2e, 0x83c0,        -- 30: IFG C, 83c0
+  0x7c2e, screenLastLine,-- 30: IFG C, 83c0
   0x8423,                -- 32: SUB C, 01
   0x89c1,                -- 33: SET PC, 02 ;loop0
                          --  init:
-  0x7c21, 0x8000,        -- 34: SET C, 8000
+  0x7c21, screenStart,   -- 34: SET C, 8000
                          --  loop4:
   0x7ca1, 0x74a0,        -- 36: SET [C], 74a0
   0x8422,                -- 38: ADD C, 01
-  0x09fe, 0x83e8,        -- 39: IFG 83e8, C
+  0x09fe, screenEnd,     -- 39: IFG 83e8, C
   0x99c3,                -- 3b: SUB PC, 6 ;loop4
                          --  loop5:
-  0x4101, 0x8398, 0x0048,-- 3c: SET [8398+A], [0048+A] ;data
+  0x4101, screenLastLine,
+                  0x0047,-- 3c: SET [83c0+A], [0047+A] ;data
   0x8402,                -- 3f: ADD A, 01
-  0x810d, 0x0048,        -- 40: IFN [0048+A], 00 ;data
+  0x810d, 0x0047,        -- 40: IFN [0047+A], 00 ;data
   0x9dc3,                -- 42: SUB PC, 07 ;loop5
-  0x7c11, 0x9000,        -- 43: SET B, 9000
-  0x7c21, 0x83c0,        -- 45: SET C, 83c0
-  0x89c1,                -- 47: SET PC, 02 ;loop0
+  0x7c11, keyStart,      -- 43: SET B, 9000
+  0x7dc1, 0x001f,        -- 45: SET PC, 1f ;scroll
                          --  data:
-                         -- 48:
+                         -- 47:
   0x64d2, 0x64e5, 0x64e1, 0x64e4, 0x64f9]
+  where
+    screenStart = screenAddr dcmState
+    screenEnd = screenAddr dcmState + screenWidth dcmState*screenHeight dcmState
+    screenLastLine = screenEnd - screenWidth dcmState
+    keyStart = keyBuffer dcmState
